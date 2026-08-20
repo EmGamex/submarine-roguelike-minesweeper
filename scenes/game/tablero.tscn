@@ -10,3 +10,6 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_tablero")
+board_width = 12
+board_height = 12
+total_mines = 24

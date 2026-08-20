@@ -31,3 +31,21 @@ func test_solver_solves_deterministic_board() -> void:
 	
 	assert_true(result.is_solvable, "El tablero con 1 sola mina alejada debe resolverse al 100%")
 	assert_eq(result.flagged_count, 1)
+	assert_gt(result.trivial_deductions_count, 0)
+
+func test_solver_tracks_deduction_metrics() -> void:
+	# Tablero con patrón 1-2-1 horizontal
+	# [ ?, ?, ? ]
+	# [ 1, 2, 1 ]
+	# [ 0, 0, 0 ]
+	var board := BoardData.new(3, 3)
+	board.cells[Vector2i(0, 0)].is_mine = true
+	board.cells[Vector2i(2, 0)].is_mine = true
+	board.calculate_neighbor_numbers()
+	
+	var solver := MinesweeperSolver.new()
+	var result := solver.solve(board, Vector2i(1, 2))
+	
+	assert_true(result.is_solvable, "El patrón 1-2-1 debe ser resoluble de manera determinista")
+	assert_eq(result.flagged_count, 2, "Debe haber detectado y marcado las 2 minas")
+	assert_eq(result.revealed_count, 7, "Debe haber revelado las 7 celdas seguras")

@@ -15,12 +15,21 @@ signal cell_flagged(pos: Vector2i, is_flagged: bool)
 @export_group("Visuals")
 @export var cell_size: Vector2 = Vector2(44, 44)
 
-enum GameState { READY_FIRST_CLICK, PLAYING, WON, LOST }
+@export_group("Animation")
+@export var enable_sweep_animation: bool = true
+@export var sweep_step_delay: float = 0.025
+@export var sweep_cell_duration: float = 0.22
+@export var enable_panel_resize_animation: bool = true
+@export var panel_resize_duration: float = 0.24
+
+enum GameState { SWEEP_ANIMATING, READY_FIRST_CLICK, PLAYING, WON, LOST }
 
 var current_state: GameState = GameState.READY_FIRST_CLICK
 var board_data: BoardData
 var generator: BoardGenerator
 var buttons_grid: Dictionary = {} # Vector2i -> Button
+var active_sweep_tween: Tween
+var active_panel_tween: Tween
 
 var status_label: Label
 var mine_count_label: Label
@@ -206,6 +215,7 @@ func _setup_tactical_console_ui() -> void:
 	status_label.name = "StatusDisplay"
 	status_label.text = ">> SONAR EN ESPERA: HAZ CLIC EN CUALQUIER COORDENADA PARA INICIAR BARRIDO <<"
 	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status_label.clip_text = true
 	status_label.add_theme_color_override("font_color", COLOR_PHOSPHOR_BRIGHT)
 	status_panel.add_child(status_label)
 	
@@ -283,13 +293,72 @@ func _style_tactical_button(btn: Button) -> void:
 	btn.add_theme_color_override("font_color", COLOR_PHOSPHOR_BRIGHT)
 	btn.add_theme_color_override("font_hover_color", Color.WHITE)
 
+## Actualiza el texto de estado del sonar sin provocar sacudidas en el marco de la consola
+func _set_status_text(new_text: String, text_color: Color = COLOR_PHOSPHOR_BRIGHT) -> void:
+	if status_label == null:
+		return
+	status_label.text = new_text
+	status_label.add_theme_color_override("font_color", text_color)
+
+## Calcula el tamaño óptimo de la consola basándose en la cuadrícula y las barras tácticas
+func _calculate_console_target_size() -> Vector2:
+	var grid_w := float(board_width * int(cell_size.x) + max(board_width - 1, 0) * 4 + 16)
+	var grid_h := float(board_height * int(cell_size.y) + max(board_height - 1, 0) * 4 + 16)
+	
+	# Ancho mínimo para alojar cómodamente la barra de cabecera, telemetría y controles inferiores
+	var min_ui_width := 560.0
+	var target_w := maxf(grid_w + 40.0, min_ui_width)
+	
+	# Altura total estimada: cuadrícula + cabecera, telemetría, status, footer y márgenes
+	var target_h := grid_h + 200.0
+	
+	return Vector2(target_w, target_h)
+
+## Ajusta suavemente las dimensiones del marco de la consola mediante Tween (en X e Y)
+func _update_console_size(animate: bool = true) -> void:
+	if console_panel == null or not is_inside_tree():
+		return
+	
+	if active_panel_tween and active_panel_tween.is_valid():
+		active_panel_tween.kill()
+	
+	var target_size := _calculate_console_target_size()
+	var current_size := console_panel.custom_minimum_size
+	
+	if current_size == Vector2.ZERO:
+		current_size = console_panel.size if console_panel.size != Vector2.ZERO else target_size
+	
+	if enable_panel_resize_animation and animate and current_size != target_size:
+		console_panel.custom_minimum_size = current_size
+		active_panel_tween = create_tween().set_parallel(true)
+		active_panel_tween.tween_property(console_panel, "custom_minimum_size:x", target_size.x, panel_resize_duration)\
+			.set_trans(Tween.TRANS_CUBIC)\
+			.set_ease(Tween.EASE_OUT)
+		active_panel_tween.tween_property(console_panel, "custom_minimum_size:y", target_size.y, panel_resize_duration)\
+			.set_trans(Tween.TRANS_CUBIC)\
+			.set_ease(Tween.EASE_OUT)
+	else:
+		console_panel.custom_minimum_size = target_size
+
+## Modifica las dimensiones del tablero dinámicamente y recalibra la consola
+func set_board_dimensions(new_width: int, new_height: int, new_mines: int = -1, no_guess: bool = true) -> void:
+	board_width = new_width
+	board_height = new_height
+	if new_mines > 0:
+		total_mines = new_mines
+	ensure_no_guess = no_guess
+	reset_game()
+
 func reset_game() -> void:
-	current_state = GameState.READY_FIRST_CLICK
+	if active_sweep_tween and active_sweep_tween.is_valid():
+		active_sweep_tween.kill()
+		
 	generator = BoardGenerator.new(board_width, board_height, total_mines, ensure_no_guess)
 	board_data = generator.create_empty_board()
 	
 	buttons_grid.clear()
 	for child in grid_container.get_children():
+		grid_container.remove_child(child)
 		child.queue_free()
 	
 	grid_container.columns = board_width
@@ -299,6 +368,7 @@ func reset_game() -> void:
 			var pos := Vector2i(x, y)
 			var btn := Button.new()
 			btn.custom_minimum_size = cell_size
+			btn.pivot_offset = cell_size * 0.5
 			btn.text = "·" # Indicador de retícula analógica
 			btn.focus_mode = Control.FOCUS_NONE
 			
@@ -308,10 +378,63 @@ func reset_game() -> void:
 			grid_container.add_child(btn)
 			buttons_grid[pos] = btn
 	
-	if status_label:
-		status_label.text = ">> SONAR EN ESPERA: HAZ CLIC EN CUALQUIER COORDENADA PARA INICIAR BARRIDO <<"
-		status_label.add_theme_color_override("font_color", COLOR_PHOSPHOR_BRIGHT)
 	_update_telemetry()
+	_update_console_size(enable_panel_resize_animation)
+	
+	if enable_sweep_animation:
+		play_sonar_sweep_animation()
+	else:
+		current_state = GameState.READY_FIRST_CLICK
+		_set_status_text(">> SONAR EN ESPERA: HAZ CLIC EN CUALQUIER COORDENADA PARA INICIAR BARRIDO <<", COLOR_PHOSPHOR_BRIGHT)
+
+## Ejecuta la animación de barrido de sonar con un Tween paralelo escalonado por diagonales (x + y)
+func play_sonar_sweep_animation(on_complete: Callable = Callable()) -> void:
+	current_state = GameState.SWEEP_ANIMATING
+	_set_status_text(">> CALIBRANDO BARRIDO ACÚSTICO DEL SECTOR... <<", COLOR_AMBER_ALERT)
+	
+	if active_sweep_tween and active_sweep_tween.is_valid():
+		active_sweep_tween.kill()
+	
+	active_sweep_tween = create_tween().set_parallel(true)
+	
+	for y in range(board_height):
+		for x in range(board_width):
+			var pos := Vector2i(x, y)
+			var btn: Button = buttons_grid.get(pos, null)
+			if btn == null:
+				continue
+			
+			btn.modulate = Color(0.1, 0.4, 0.2, 0.2)
+			btn.scale = Vector2(0.8, 0.8)
+			
+			var delay: float = float(x + y) * sweep_step_delay
+			
+			active_sweep_tween.tween_property(btn, "modulate", COLOR_PHOSPHOR_BRIGHT * 1.4, sweep_cell_duration * 0.4)\
+				.set_delay(delay)\
+				.set_trans(Tween.TRANS_QUAD)\
+				.set_ease(Tween.EASE_OUT)
+			
+			active_sweep_tween.tween_property(btn, "scale", Vector2(1.12, 1.12), sweep_cell_duration * 0.4)\
+				.set_delay(delay)\
+				.set_trans(Tween.TRANS_BACK)\
+				.set_ease(Tween.EASE_OUT)
+			
+			active_sweep_tween.tween_property(btn, "modulate", Color.WHITE, sweep_cell_duration * 0.6)\
+				.set_delay(delay + sweep_cell_duration * 0.4)\
+				.set_trans(Tween.TRANS_SINE)\
+				.set_ease(Tween.EASE_IN_OUT)
+			
+			active_sweep_tween.tween_property(btn, "scale", Vector2.ONE, sweep_cell_duration * 0.6)\
+				.set_delay(delay + sweep_cell_duration * 0.4)\
+				.set_trans(Tween.TRANS_SINE)\
+				.set_ease(Tween.EASE_IN_OUT)
+	
+	active_sweep_tween.chain().tween_callback(func() -> void:
+		current_state = GameState.READY_FIRST_CLICK
+		_set_status_text(">> SONAR EN ESPERA: HAZ CLIC EN CUALQUIER COORDENADA PARA INICIAR BARRIDO <<", COLOR_PHOSPHOR_BRIGHT)
+		if on_complete.is_valid():
+			on_complete.call()
+	)
 
 func _apply_hidden_style(btn: Button) -> void:
 	btn.disabled = false
@@ -324,7 +447,7 @@ func _apply_hidden_style(btn: Button) -> void:
 	btn.add_theme_color_override("font_hover_color", COLOR_PHOSPHOR_BRIGHT)
 
 func _on_cell_gui_input(event: InputEvent, pos: Vector2i) -> void:
-	if current_state == GameState.WON or current_state == GameState.LOST:
+	if current_state == GameState.SWEEP_ANIMATING or current_state == GameState.WON or current_state == GameState.LOST:
 		return
 	
 	if event is InputEventMouseButton and event.pressed:
@@ -342,16 +465,12 @@ func _handle_left_click(pos: Vector2i) -> void:
 	
 	# Primer click: generar tablero garantizado No-Guess
 	if current_state == GameState.READY_FIRST_CLICK:
-		if status_label:
-			status_label.text = ">> CALCULANDO MATRICES GAUSS-JORDAN... GENERANDO TABLERO SIN 50/50 <<"
-			status_label.add_theme_color_override("font_color", COLOR_AMBER_ALERT)
+		_set_status_text(">> CALCULANDO MATRICES GAUSS-JORDAN... GENERANDO TABLERO SIN 50/50 <<", COLOR_AMBER_ALERT)
 		
 		board_data = generator.generate_board(pos)
 		current_state = GameState.PLAYING
 		
-		if status_label:
-			status_label.text = ">> SONAR ACTIVO // SECTOR 100% RESOLUBLE POR DEDUCCIÓN LÓGICA <<"
-			status_label.add_theme_color_override("font_color", COLOR_PHOSPHOR_BRIGHT)
+		_set_status_text(">> SONAR ACTIVO // SECTOR 100% RESOLUBLE POR DEDUCCIÓN LÓGICA <<", COLOR_PHOSPHOR_BRIGHT)
 		game_started.emit()
 	
 	if cell.is_flagged():
@@ -375,7 +494,7 @@ func _handle_left_click(pos: Vector2i) -> void:
 	_check_win_condition()
 
 func _handle_right_click(pos: Vector2i) -> void:
-	if current_state == GameState.READY_FIRST_CLICK:
+	if current_state == GameState.READY_FIRST_CLICK or current_state == GameState.SWEEP_ANIMATING:
 		return
 	
 	var cell := board_data.get_cell(pos)
@@ -454,17 +573,13 @@ func _update_telemetry() -> void:
 func _check_win_condition() -> void:
 	if board_data.is_solved():
 		current_state = GameState.WON
-		if status_label:
-			status_label.text = "✔ ¡SECTOR ASEGURADO! CASCO ÍNTEGRO // RUTA SUBMARINA DESPEJADA"
-			status_label.add_theme_color_override("font_color", COLOR_PHOSPHOR_BRIGHT)
+		_set_status_text("✔ ¡SECTOR ASEGURADO! CASCO ÍNTEGRO // RUTA SUBMARINA DESPEJADA", COLOR_PHOSPHOR_BRIGHT)
 		game_won.emit()
 
-func _game_over(won: bool, hit_pos: Vector2i = Vector2i(-1, -1)) -> void:
+func _game_over(won: bool, _hit_pos: Vector2i = Vector2i(-1, -1)) -> void:
 	current_state = GameState.LOST if not won else GameState.WON
 	if not won:
-		if status_label:
-			status_label.text = "⚠ ¡COLISIÓN SUBACUÁTICA! MINA DETONADA // CASCO COMPROMETIDO"
-			status_label.add_theme_color_override("font_color", COLOR_TORPEDO_RED)
+		_set_status_text("⚠ ¡COLISIÓN SUBACUÁTICA! MINA DETONADA // CASCO COMPROMETIDO", COLOR_TORPEDO_RED)
 		
 		# Revelar todas las minas en la consola
 		for pos: Vector2i in board_data.cells.keys():
