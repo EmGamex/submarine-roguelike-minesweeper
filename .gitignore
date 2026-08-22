@@ -1,3 +1,26 @@
-# Godot 4+ specific ignores
+# Godot 4+ cache y artefactos
 .godot/
+
+# Builds y exports locales
+build/
+bin/
+export/
+*.apk
+*.aab
+*.exe
+*.pck
+
+# C# / Mono
+.vs/
+.vscode/
+*.csproj.user
+[Bb]in/
+[Oo]bj/
+
+# Plantillas de build móviles nativas
 /android/
+/ios/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
